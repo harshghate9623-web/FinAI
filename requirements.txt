@@ -1,0 +1,35 @@
+# FinDoc AI — Python Dependencies
+
+# Web framework
+fastapi
+uvicorn[standard]
+
+# Data & ML
+pandas
+numpy
+scikit-learn
+joblib
+
+# OCR & image processing
+pytesseract
+Pillow
+pdf2image
+pypdf
+
+# API validation
+pydantic
+python-multipart
+
+# UI (dashboard)
+streamlit
+
+# Database (PostgreSQL — Aiven)
+psycopg2-binary==2.9.9
+sqlalchemy
+
+# Testing
+pytest
+httpx
+
+# Fuzzy matching (for near-duplicate detection)
+rapidfuzz

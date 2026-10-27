@@ -1,0 +1,30 @@
+TAX INVOICE
+Acme Tech Solutions Pvt Ltd
+123 Tech Park, Andheri East, Mumbai, Maharashtra 400069
+GSTIN: 27AAPFU0939F1ZV
+Phone: +91 9876543210
+Email: billing@acmetech.in
+
+Billed To:
+Beta Retail Enterprises
+456 Market Road, Pune, Maharashtra 411001
+GSTIN: 27BAPFU1234F1Z1
+
+Invoice No: INV-2024-8842
+Invoice Date: 12/10/2026
+Due Date: 30/11/2026
+Place of Supply: Maharashtra
+
+--------------------------------------------------------------------------------
+Item | Description | HSN | Qty | Rate | Amount
+--------------------------------------------------------------------------------
+1 | Cloud Server Hosting | 998313 | 2 | 5000.00 | 10000.00
+2 | Security Audit Service | 998314 | 1 | 2000.00 | 2000.00
+--------------------------------------------------------------------------------
+Subtotal: 12000.00
+Discount: 0.00
+CGST @ 9%: 1080.00
+SGST @ 9%: 1080.00
+IGST: 0.00
+Total GST: 2160.00
+Grand Total: 14160.00

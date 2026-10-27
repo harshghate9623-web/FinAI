@@ -1,0 +1,33 @@
+version: "3.9"
+
+services:
+  api:
+    build: .
+    container_name: findoc_api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./uploads:/app/uploads
+      - ./artifacts:/app/artifacts
+    environment:
+      - UPLOAD_DIR=/app/uploads
+      - IF_MODEL_PATH=/app/artifacts/isolation_forest_tuned.pkl
+      - IF_IMPUTER_PATH=/app/artifacts/isolation_forest_imputer.pkl
+      - MAX_FILE_SIZE_MB=20
+      - MAX_PAGES=30
+    restart: unless-stopped
+
+  ui:
+    image: python:3.11-slim
+    container_name: findoc_ui
+    working_dir: /app
+    volumes:
+      - .:/app
+    ports:
+      - "8501:8501"
+    command: >
+      bash -c "pip install streamlit requests --quiet &&
+               streamlit run ui/streamlit_app.py --server.port=8501 --server.address=0.0.0.0"
+    depends_on:
+      - api
+    restart: unless-stopped
