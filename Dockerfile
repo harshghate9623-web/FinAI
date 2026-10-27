@@ -19,5 +19,7 @@ COPY . .
 # Expose API port
 EXPOSE 8000
 
-# Start the FastAPI server
-CMD ["uvicorn", "app.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+# Start both FastAPI & Streamlit
+RUN chmod +x start.sh
+CMD ["./start.sh"]
+
