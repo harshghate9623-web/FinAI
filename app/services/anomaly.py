@@ -65,11 +65,20 @@ class AnomalyDetector:
         self._model = joblib.load(self.model_path)
 
         if self.imputer_path.exists():
-            self._imputer = joblib.load(self.imputer_path)
+            try:
+                self._imputer = joblib.load(self.imputer_path)
+                # Fix scikit-learn version incompatibility for SimpleImputer
+                if not hasattr(self._imputer, "_fill_dtype"):
+                    fill_dt = getattr(self._imputer, "statistics_", np.array([0.0])).dtype
+                    setattr(self._imputer, "_fill_dtype", fill_dt)
+            except Exception:
+                self._imputer = None
         else:
+            self._imputer = None
+
+        if self._imputer is None:
             from sklearn.impute import SimpleImputer
-            self._imputer = SimpleImputer(strategy="constant", fill_value=0.0)
-            # Fit on dummy zero data to initialize shape
+            self._imputer = SimpleImputer(strategy="median")
             self._imputer.fit(np.zeros((1, len(MODEL_FEATURES))))
 
         self._loaded = True
@@ -77,6 +86,17 @@ class AnomalyDetector:
     @property
     def is_loaded(self) -> bool:
         return self._loaded
+
+    def _safe_impute(self, X: pd.DataFrame) -> np.ndarray:
+        """Safely impute missing features with fallback for scikit-learn version mismatches."""
+        try:
+            return self._imputer.transform(X)
+        except Exception:
+            # Fallback to direct statistics-based fillna if unpickled imputer version differs
+            if hasattr(self._imputer, "statistics_") and len(self._imputer.statistics_) == len(MODEL_FEATURES):
+                stats_series = pd.Series(self._imputer.statistics_, index=MODEL_FEATURES)
+                return X.fillna(stats_series).fillna(0.0).to_numpy()
+            return X.fillna(0.0).to_numpy()
 
     def predict(
         self, fields: Dict[str, Any]
@@ -102,7 +122,7 @@ class AnomalyDetector:
             return False, None, True  # cannot score — missing inputs
 
         X_imputed = pd.DataFrame(
-            self._imputer.transform(X), columns=MODEL_FEATURES
+            self._safe_impute(X), columns=MODEL_FEATURES
         )
 
         prediction = self._model.predict(X_imputed)[0]         # -1 or 1
@@ -134,7 +154,7 @@ class AnomalyDetector:
         valid = ~invalid
         if valid.any():
             X_valid = pd.DataFrame(
-                self._imputer.transform(X.loc[valid]), columns=MODEL_FEATURES
+                self._safe_impute(X.loc[valid]), columns=MODEL_FEATURES
             )
             preds = self._model.predict(X_valid)
             scores = self._model.decision_function(X_valid)
