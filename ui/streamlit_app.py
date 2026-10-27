@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 from typing import Any, Dict, List, Optional
 import pandas as pd
 import requests
 import streamlit as st
 
-API_BASE = "http://localhost:8000"
+API_BASE = os.getenv("API_BASE", "http://127.0.0.1:8000")
 
 st.set_page_config(
     page_title="FinDoc AI — Invoice Review",

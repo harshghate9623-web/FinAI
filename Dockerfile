@@ -16,10 +16,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy source code
 COPY . .
 
-# Expose API port
-EXPOSE 8000
-
-# Start both FastAPI & Streamlit
+# Make start script executable
 RUN chmod +x start.sh
-CMD ["./start.sh"]
 
+# Start both FastAPI backend and Streamlit dashboard
+CMD ["./start.sh"]
