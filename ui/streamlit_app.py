@@ -202,11 +202,16 @@ if input_mode == "📁 Upload Invoice / OCR File":
                         st.session_state["selected_invoice_idx"] = 0
                         st.session_state["uploaded_file_bytes"] = file_bytes
                         st.session_state["uploaded_file_name"] = uploaded_file.name
-                        total_invs = st.session_state["invoice_result"].get("total_invoices", 1)
+                        created_ids = st.session_state["invoice_result"].get("database_invoice_ids", [])
+                        if not created_ids and "invoices" in st.session_state["invoice_result"]:
+                            created_ids = [inv.get("invoice_id") for inv in st.session_state["invoice_result"]["invoices"] if inv.get("invoice_id")]
+                        total_invs = st.session_state["invoice_result"].get("total_invoices", len(created_ids) or 1)
                         if total_invs > 1:
-                            st.success(f"Multi-invoice PDF detected! Separated {total_invs} pages into distinct invoices.")
+                            id_tags = ", ".join(f"#{cid}" for cid in created_ids)
+                            st.success(f"Multi-invoice PDF detected! Separated {total_invs} pages into distinct invoices and created {total_invs} separate records in PostgreSQL database ({id_tags}). Use the selector on the right to inspect each invoice individually.")
                         else:
-                            st.success("Invoice analyzed and persisted to database!")
+                            single_id = created_ids[0] if created_ids else st.session_state["invoice_result"].get("invoice_id", 1)
+                            st.success(f"Invoice analyzed and saved as record #{single_id} in PostgreSQL database!")
                     else:
                         st.error(f"API error {response.status_code}: {response.text}")
                 except requests.exceptions.ConnectionError:
@@ -414,14 +419,22 @@ if data:
 
         if total_detected > 1:
             st.markdown(
-                f"<div style='margin-bottom: 0.75rem; font-size: 0.95rem; color: #0d6efd; font-weight: 500;'>"
+                f"<div style='margin-bottom: 0.35rem; font-size: 0.95rem; color: #0d6efd; font-weight: 600;'>"
                 f"📑 <strong>Multi-Invoice Document:</strong> Viewing <strong>Invoice {selected_idx + 1} of {total_detected}</strong> "
                 f"(Page {page_num})"
+                f"</div>"
+                f"<div style='margin-bottom: 0.65rem; font-size: 0.82rem; color: #6c757d;'>"
+                f"Database Entry: <strong>Invoice #{inv_id or (selected_idx + 1)}</strong> &bull; Stored as separate row in PostgreSQL"
                 f"</div>",
                 unsafe_allow_html=True,
             )
         else:
-            st.caption("Standard single invoice verification result.")
+            st.markdown(
+                f"<div style='margin-bottom: 0.65rem; font-size: 0.82rem; color: #6c757d;'>"
+                f"Database Entry: <strong>Invoice #{inv_id or 1}</strong> &bull; Stored as separate row in PostgreSQL"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
 
         # Status badge for currently selected invoice
         if status_val in ["Checked", "Passed Initial Checks"]:
@@ -467,12 +480,14 @@ if data:
             f_item = inv_item.get("extracted_fields") or inv_item
             inv_no = f_item.get("invoice_number") or "N/A"
             v_name = f_item.get("vendor_name") or "Unknown Vendor"
-            v_clean = (v_name[:18] + "...") if len(v_name) > 20 else v_name
+            v_clean = (v_name[:16] + "...") if len(v_name) > 18 else v_name
             tot = f_item.get("total_amount")
             tot_str = f"₹{float(tot):,.2f}" if tot is not None else "₹0.00"
             stat = inv_item.get("review_status", "")
             icon = "✅" if stat in ["Checked", "Passed Initial Checks"] and not inv_item.get("final_anomaly") else ("⚠️" if inv_item.get("final_anomaly") or "Review" in stat or "Flagged" in stat else "📄")
-            return f"{icon} Page {p_num}: {v_clean} (Inv #{inv_no}) — {tot_str}"
+            item_db_id = inv_item.get("invoice_id")
+            db_tag = f"DB #{item_db_id} | " if item_db_id else ""
+            return f"{icon} {db_tag}Page {p_num}: {v_clean} (Inv #{inv_no}) — {tot_str}"
 
         selected_dropdown = st.selectbox(
             "Select Detected Invoice:",
@@ -573,12 +588,49 @@ if data:
 
         # Action Buttons Directly Below the Bill
         st.markdown("#### ✍️ Human Review Decision")
-        st.write(f"Confirm verification or flag **Invoice #{inv_id or (selected_idx + 1)}** for further auditing:")
+
+        is_checked = (status_val == "Checked")
+        is_flagged = (status_val == "Marked for Review")
+
+        # Dynamic decision state indicator for this specific invoice
+        if is_checked:
+            status_box_bg = "rgba(25, 135, 84, 0.12)"
+            status_box_border = "rgba(25, 135, 84, 0.35)"
+            status_box_color = "#198754"
+            status_box_text = f"✅ Currently <strong>Checked & Verified</strong> in Database for Invoice #{inv_id or (selected_idx + 1)}"
+        elif is_flagged:
+            status_box_bg = "rgba(255, 193, 7, 0.15)"
+            status_box_border = "rgba(255, 193, 7, 0.45)"
+            status_box_color = "#856404"
+            status_box_text = f"⚠️ Currently <strong>Marked for Review</strong> in Database for Invoice #{inv_id or (selected_idx + 1)}"
+        else:
+            status_box_bg = "rgba(108, 117, 125, 0.08)"
+            status_box_border = "rgba(108, 117, 125, 0.25)"
+            status_box_color = "#495057"
+            status_box_text = f"⏳ <strong>Pending Review</strong> — choose a verification decision below for Invoice #{inv_id or (selected_idx + 1)}"
+
+        st.markdown(
+            f"""
+            <div style="
+                background: {status_box_bg};
+                border: 1px solid {status_box_border};
+                color: {status_box_color};
+                padding: 0.6rem 0.9rem;
+                border-radius: 8px;
+                font-size: 0.88rem;
+                margin-bottom: 0.75rem;
+            ">
+                {status_box_text}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
         btn_col1, btn_col2 = st.columns(2)
 
         with btn_col1:
-            if st.button("⚠️ Mark as review", type="secondary", use_container_width=True, key=f"btn_review_{selected_idx}"):
+            btn_label = "⚠️ Marked for Review (Selected)" if is_flagged else "⚠️ Mark for Review"
+            if st.button(btn_label, type="secondary", use_container_width=True, key=f"btn_review_{selected_idx}_{inv_id}"):
                 new_status = "Marked for Review"
                 if inv_id:
                     try:
@@ -588,7 +640,7 @@ if data:
                             timeout=8,
                         )
                         if res.ok:
-                            st.toast(f"⚠️ Invoice #{inv_id} status updated to 'Marked for Review' in database!", icon="⚠️")
+                            st.toast(f"⚠️ Invoice #{inv_id} updated to 'Marked for Review' in database!", icon="⚠️")
                         else:
                             st.error(f"Failed to update database: {res.text}")
                     except Exception as err:
@@ -604,7 +656,9 @@ if data:
                 st.rerun()
 
         with btn_col2:
-            if st.button("✅ Checked", type="primary", use_container_width=True, key=f"btn_checked_{selected_idx}"):
+            btn_label = "✅ Checked (Selected)" if is_checked else "✅ Confirm as Checked"
+            btn_type = "secondary" if is_checked else "primary"
+            if st.button(btn_label, type=btn_type, use_container_width=True, key=f"btn_checked_{selected_idx}_{inv_id}"):
                 new_status = "Checked"
                 if inv_id:
                     try:
@@ -614,7 +668,7 @@ if data:
                             timeout=8,
                         )
                         if res.ok:
-                            st.toast(f"✅ Invoice #{inv_id} status updated to 'Checked' in database!", icon="✅")
+                            st.toast(f"✅ Invoice #{inv_id} updated to 'Checked' in database!", icon="✅")
                         else:
                             st.error(f"Failed to update database: {res.text}")
                     except Exception as err:
@@ -710,3 +764,38 @@ if data:
 
             if current_invoice.get("missing_fields"):
                 st.warning("⚠️ Incomplete fields: " + ", ".join(current_invoice["missing_fields"]))
+
+    # -------------------------------------------------------------------------
+    # Bottom Section: PostgreSQL Database Invoices Overview
+    # -------------------------------------------------------------------------
+    st.markdown("---")
+    with st.expander("🗄️ Relational Database Records (Live PostgreSQL Entries)", expanded=False):
+        st.markdown(
+            "Below are the verified individual invoice rows registered in the PostgreSQL database. "
+            "Each page of a multi-invoice PDF is saved as its own distinct database row with a unique ID:"
+        )
+        try:
+            db_invoices_resp = requests.get(f"{API_BASE}/invoices?limit=50", timeout=5)
+            if db_invoices_resp.ok:
+                db_data = db_invoices_resp.json()
+                if db_data:
+                    display_rows = []
+                    for row in db_data:
+                        display_rows.append({
+                            "DB ID": f"#{row.get('invoice_id')}",
+                            "Invoice #": row.get("invoice_number") or "-",
+                            "Vendor": row.get("vendor_name") or "-",
+                            "GSTIN": row.get("gstin") or "-",
+                            "Amount (₹)": f"₹{float(row.get('total_amount', 0)):,.2f}",
+                            "Review Status": row.get("review_status") or "Pending",
+                            "File / Page": row.get("file_name") or "-",
+                            "Anomaly": "⚠️ Flagged" if row.get("final_anomaly") else "✅ Normal",
+                        })
+                    st.dataframe(pd.DataFrame(display_rows), hide_index=True, use_container_width=True)
+                else:
+                    st.info("No invoice records in database yet.")
+            else:
+                st.warning("Could not fetch database records.")
+        except Exception as exc:
+            st.error(f"Error fetching database records: {exc}")
+

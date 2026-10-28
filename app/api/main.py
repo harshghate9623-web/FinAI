@@ -176,6 +176,11 @@ async def upload_invoice(
             _in_memory_invoices.append(res["validated"])
 
         res["invoice_id"] = inv_id
+        res["validated"]["invoice_id"] = inv_id
+
+        # Keep in-memory cache synchronized so both storage tiers reflect each invoice
+        if not any(item.get("invoice_id") == inv_id for item in _in_memory_invoices):
+            _in_memory_invoices.append(res["validated"])
 
         inv_dict = {
             "invoice_id": inv_id,
@@ -203,10 +208,12 @@ async def upload_invoice(
         invoices_list.append(inv_dict)
 
     first_inv = invoices_list[0]
+    created_ids = [inv["invoice_id"] for inv in invoices_list if inv.get("invoice_id")]
     response_payload = {
         "status": "success",
         "total_invoices": len(invoices_list),
         "is_multi_invoice": len(invoices_list) > 1,
+        "database_invoice_ids": created_ids,
         "invoices": invoices_list,
         **first_inv,
     }
