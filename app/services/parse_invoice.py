@@ -176,6 +176,71 @@ def extract_state_info(text: str, gstin: Optional[str] = None) -> Tuple[Optional
     return state_name, state_code
 
 
+def normalize_gstin(raw: Any) -> Optional[str]:
+    """
+    Cleans, fixes OCR character transposition errors, and validates 15-character Indian GSTINs.
+    Structure:
+      Positions 0-1  : 2-digit state code (01-38)
+      Positions 2-6  : 5-letter PAN alphabet
+      Positions 7-10 : 4-digit PAN numeric
+      Positions 11   : 1-letter PAN entity
+      Positions 12   : 1-alphanumeric (entity number, default 1)
+      Positions 13   : Always 'Z'
+      Positions 14   : 1-alphanumeric check digit
+    """
+    if not raw:
+        return None
+    cleaned = re.sub(r"[\s\-_:./\\,]", "", str(raw)).upper()
+    if len(cleaned) < 15:
+        return None
+    if len(cleaned) > 15:
+        m = re.search(r"[0-9A-Z]{15}", cleaned)
+        if m:
+            cleaned = m.group(0)
+        else:
+            cleaned = cleaned[:15]
+
+    chars = list(cleaned)
+    digit_fix = {"O": "0", "D": "0", "Q": "0", "I": "1", "L": "1", "Z": "2", "B": "8", "S": "5", "G": "6"}
+    letter_fix = {"0": "O", "1": "I", "2": "Z", "8": "B", "5": "S", "6": "G"}
+
+    # Positions 0, 1: State code (digits)
+    for i in (0, 1):
+        if chars[i] in digit_fix:
+            chars[i] = digit_fix[chars[i]]
+
+    # Positions 2-6: PAN letters
+    for i in range(2, 7):
+        if chars[i] in letter_fix:
+            chars[i] = letter_fix[chars[i]]
+
+    # Positions 7-10: PAN digits
+    for i in range(7, 11):
+        if chars[i] in digit_fix:
+            chars[i] = digit_fix[chars[i]]
+
+    # Position 11: PAN letter
+    if chars[11] in letter_fix:
+        chars[11] = letter_fix[chars[11]]
+
+    # Position 12: Entity number (if letter I or L, map to 1)
+    if chars[12] in ("I", "L"):
+        chars[12] = "1"
+    elif chars[12] == "O":
+        chars[12] = "0"
+
+    # Position 13: Must be 'Z'
+    if chars[13] in ("2", "7", "S"):
+        chars[13] = "Z"
+
+    candidate = "".join(chars)
+    if re.fullmatch(r"[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z]Z[0-9A-Z]", candidate):
+        return candidate
+    if len(candidate) == 15 and candidate[:2].isdigit():
+        return candidate
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Section extractors
 # ---------------------------------------------------------------------------
@@ -183,14 +248,19 @@ def extract_state_info(text: str, gstin: Optional[str] = None) -> Tuple[Optional
 def extract_metadata(text: str) -> Dict[str, Any]:
     invoice_number = find_regex(
         [
-            r"(?:Invoice\s*(?:No\.?|Number|#))\s*[:\-]?\s*([A-Za-z0-9/\-_]+)",
-            r"(?:Bill\s*(?:No\.?|Number|#))\s*[:\-]?\s*([A-Za-z0-9/\-_]+)",
-            r"(?:Tax\s*Invoice\s*(?:No\.?|#)?)\s*[:\-]?\s*([A-Za-z0-9/\-_]+)",
-            r"\bINV[-/_]?[0-9A-Za-z\-_]+",
+            r"(?:Invoice\s*(?:No\.?|Num|Number|Na|N0|#|ID))\s*[:.\-]?\s*([A-Za-z0-9/\-_\.]+)",
+            r"(?:Bill\s*(?:No\.?|Num|Number|Na|N0|#|ID))\s*[:.\-]?\s*([A-Za-z0-9/\-_\.]+)",
+            r"(?:Tax\s*Invoice\s*(?:No\.?|Num|Number|#))\s*[:.\-]?\s*([A-Za-z0-9/\-_\.]+)",
+            r"(?:Inv\s*(?:No\.?|Num|#)?)\s*[:.\-]?\s*([A-Za-z0-9/\-_\.]+)",
+            r"\b(INV[\.\-/_]?[0-9A-Za-z\-_\.]+)",
         ],
         text,
         default="",
     )
+    if invoice_number:
+        invoice_number = re.sub(r"[,\.:;]+$", "", invoice_number).strip()
+        if invoice_number.lower() in ("tax", "invoice", "date", "bill", "no", "original", "duplicate"):
+            invoice_number = ""
 
     raw_date = find_regex(
         [
@@ -247,48 +317,64 @@ def extract_vendor_and_buyer(text: str) -> Tuple[Dict[str, Any], Dict[str, Any]]
     """Extract vendor (seller) and buyer (client / bill to) blocks."""
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
 
-    # Find GSTINs in document (up to 2: vendor and buyer)
-    all_gstins = re.findall(r"\b([0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1})\b", text)
+    # Collect all GSTIN candidates across the document
+    labeled_candidates = re.findall(
+        r"(?:GSTIN(?:\s*/\s*UIN)?|GST\s*NO\.?|GST\s*NUMBER|GSTIN\s*NO\.?|G\.?S\.?T\.?I\.?N\.?|GST)\s*[:.\-]?\s*([0-9A-Za-z\s\-_]{14,24})",
+        text,
+        re.IGNORECASE,
+    )
+    standalone_candidates = re.findall(
+        r"\b([0-9OIZBS]{2}[\s\-_]*[A-Z0-9]{5}[\s\-_]*[0-9OIZBS]{4}[\s\-_]*[A-Z0-9]{1}[\s\-_]*[0-9A-Z]{1}[\s\-_]*[Z27S][\s\-_]*[0-9A-Z]{1})\b",
+        text,
+        re.IGNORECASE,
+    )
 
-    vendor_gstin = all_gstins[0] if len(all_gstins) >= 1 else None
-    buyer_gstin = all_gstins[1] if len(all_gstins) >= 2 else None
+    all_raw_gstins = labeled_candidates + standalone_candidates
+    normalized_gstins: List[str] = []
+    for raw in all_raw_gstins:
+        norm = normalize_gstin(raw)
+        if norm and norm not in normalized_gstins:
+            normalized_gstins.append(norm)
 
-    # Check for labeled GSTINs
-    v_gst_match = find_regex(
+    vendor_gstin = normalized_gstins[0] if len(normalized_gstins) >= 1 else None
+    buyer_gstin = normalized_gstins[1] if len(normalized_gstins) >= 2 else None
+
+    # Check for explicitly labeled buyer GSTIN
+    b_gst_raw = find_regex(
         [
-            r"(?:Supplier|Vendor|Seller|From)[\s\S]{1,60}?GSTIN(?:\s*/\s*UIN)?\s*[:\-]?\s*([0-9A-Z]{15})",
-            r"(?:GSTIN|UIN)\s*[:\-]?\s*([0-9A-Z]{15})",
+            r"(?:Buyer|Bill\s*To|Customer|Client)[\s\S]{1,80}?(?:GSTIN(?:\s*/\s*UIN)?|GST\s*NO\.?|GST)\s*[:.\-]?\s*([0-9A-Za-z\s\-_]{14,24})",
+            r"Buyer(?:\'s)?\s*(?:GSTIN|GST)\s*[:.\-]?\s*([0-9A-Za-z\s\-_]{14,24})",
         ],
         text,
     )
-    if v_gst_match:
-        vendor_gstin = v_gst_match
-
-    b_gst_match = find_regex(
-        [
-            r"(?:Buyer|Bill\s*To|Customer|Client)[\s\S]{1,60}?GSTIN(?:\s*/\s*UIN)?\s*[:\-]?\s*([0-9A-Z]{15})",
-            r"Buyer(?:\'s)?\s*GSTIN\s*[:\-]?\s*([0-9A-Z]{15})",
-        ],
-        text,
-    )
-    if b_gst_match:
-        buyer_gstin = b_gst_match
+    if b_gst_raw:
+        norm_b = normalize_gstin(b_gst_raw)
+        if norm_b:
+            buyer_gstin = norm_b
+            if vendor_gstin == buyer_gstin and len(normalized_gstins) > 1:
+                for g in normalized_gstins:
+                    if g != buyer_gstin:
+                        vendor_gstin = g
+                        break
 
     # Vendor Name
     vendor_name = find_regex(
         [
-            r"(?:Vendor\s*Name|Supplier\s*Name|Seller|From|Sold\s*By)\s*[:\-]?\s*([A-Za-z0-9\s\.\,&'-]+)",
+            r"(?:Vendor\s*Name|Supplier\s*Name|Seller|Sold\s*By|Company\s*Name)\s*[:.\-]?\s*([A-Za-z0-9\s\.\,&'-]+)",
             r"(?:M/s\.?|M/S\.?)\s*([A-Za-z0-9\s\.\,&'-]+)",
+            r"(?:From)\s*[:.\-]\s*([A-Za-z0-9\s\.\,&'-]+)",
         ],
         text,
     )
 
     # If vendor name not found by explicit label, take the first non-generic top line
     if not vendor_name and lines:
-        for line in lines[:5]:
-            if not re.search(r"tax|invoice|bill|original|duplicate|gstin|date|phone", line, re.IGNORECASE):
-                if len(line) > 3 and not re.match(r"^[-=_*#]+$", line):
-                    vendor_name = line
+        for line in lines[:8]:
+            cleaned_line = re.sub(r"^[^A-Za-z0-9]+", "", line).strip()
+            lower = cleaned_line.lower()
+            if not any(k in lower for k in ("tax", "invoice", "bill", "original", "duplicate", "gstin", "date", "phone", "email", "address")):
+                if len(cleaned_line) > 3 and not re.match(r"^[-=_*#\s\d]+$", cleaned_line):
+                    vendor_name = cleaned_line
                     break
 
     # Buyer Name
@@ -532,53 +618,54 @@ def extract_financials(text: str, line_items: List[Dict[str, Any]]) -> Dict[str,
     """Extract financial summary and infer missing values using arithmetic."""
     subtotal = find_amount_regex(
         [
-            r"(?:Sub\s*Total|Subtotal|Taxable\s*Value|Total\s*Taxable\s*Value)\s*[:\-]?\s*(?:₹|Rs\.?\s*)?([\d,]+\.?\d*)",
+            r"(?:Sub\s*Total|Subtotal|Taxable\s*Value|Total\s*Taxable\s*Value|Taxable\s*Amount|Basic\s*Amount)\s*[:.\-]?\s*(?:₹|Rs\.?\s*|INR\s*)?([\d,]+\.?\d*)",
         ],
         text,
     )
 
     cgst = find_amount_regex(
         [
-            r"\bCGST(?:\s*@\s*[\d.]+\s*%)?\s*[:\-]?\s*(?:₹|Rs\.?\s*)?([\d,]+\.?\d*)",
-            r"(?:Central\s*GST)\s*[:\-]?\s*(?:₹|Rs\.?\s*)?([\d,]+\.?\d*)",
+            r"\bC\.?G\.?S\.?T\.?(?:\s*@\s*[\d.]+\s*%)?\s*[:.\-]?\s*(?:₹|Rs\.?\s*|INR\s*)?([\d,]+\.?\d*)",
+            r"(?:Central\s*GST)\s*[:.\-]?\s*(?:₹|Rs\.?\s*|INR\s*)?([\d,]+\.?\d*)",
         ],
         text,
     )
 
     sgst = find_amount_regex(
         [
-            r"\bSGST(?:\s*@\s*[\d.]+\s*%)?\s*[:\-]?\s*(?:₹|Rs\.?\s*)?([\d,]+\.?\d*)",
-            r"(?:State\s*GST)\s*[:\-]?\s*(?:₹|Rs\.?\s*)?([\d,]+\.?\d*)",
+            r"\bS\.?G\.?S\.?T\.?(?:\s*@\s*[\d.]+\s*%)?\s*[:.\-]?\s*(?:₹|Rs\.?\s*|INR\s*)?([\d,]+\.?\d*)",
+            r"(?:State\s*GST)\s*[:.\-]?\s*(?:₹|Rs\.?\s*|INR\s*)?([\d,]+\.?\d*)",
         ],
         text,
     )
 
     igst = find_amount_regex(
         [
-            r"\bIGST(?:\s*@\s*[\d.]+\s*%)?\s*[:\-]?\s*(?:₹|Rs\.?\s*)?([\d,]+\.?\d*)",
-            r"(?:Integrated\s*GST)\s*[:\-]?\s*(?:₹|Rs\.?\s*)?([\d,]+\.?\d*)",
+            r"\bI\.?G\.?S\.?T\.?(?:\s*@\s*[\d.]+\s*%)?\s*[:.\-]?\s*(?:₹|Rs\.?\s*|INR\s*)?([\d,]+\.?\d*)",
+            r"(?:Integrated\s*GST)\s*[:.\-]?\s*(?:₹|Rs\.?\s*|INR\s*)?([\d,]+\.?\d*)",
         ],
         text,
     )
 
     tax_amount = find_amount_regex(
         [
-            r"(?:Total\s*Tax|Tax\s*Amount|Total\s*GST)\s*[:\-]?\s*(?:₹|Rs\.?\s*)?([\d,]+\.?\d*)",
+            r"(?:Total\s*Tax|Tax\s*Amount|Total\s*GST|GST\s*Amount)\s*[:.\-]?\s*(?:₹|Rs\.?\s*|INR\s*)?([\d,]+\.?\d*)",
         ],
         text,
     )
 
     discount_amount = find_amount_regex(
         [
-            r"\bDiscount(?:\s*\([^)]*\))?\s*[:\-]?\s*(?:₹|Rs\.?\s*)?([\d,]+\.?\d*)",
+            r"\bDiscount(?:\s*\([^)]*\))?\s*[:.\-]?\s*(?:₹|Rs\.?\s*|INR\s*)?([\d,]+\.?\d*)",
         ],
         text,
     ) or 0.0
 
     total_amount = find_amount_regex(
         [
-            r"(?:Grand\s*Total|Invoice\s*Total|Total\s*Amount|Net\s*Payable|Amount\s*Due)\s*[:\-]?\s*(?:₹|Rs\.?\s*)?([\d,]+\.?\d*)",
-            r"\bTotal\s*[:\-]?\s*(?:₹|Rs\.?\s*)?([\d,]+\.?\d*)",
+            r"(?:Grand\s*Total|Invoice\s*Total|Final\s*Total|Net\s*Payable|Net\s*Amount|Amount\s*Payable|Amount\s*Due|Total\s*Due|Bill\s*Total)\s*[:.\-]?\s*(?:₹|Rs\.?\s*|INR\s*)?([\d,]+\.?\d*)",
+            r"(?<!Total\s)(?<!Sub\s)(?<!Sub)(?<!Total\sTax\s)(?<!Total\sGST\s)\bTotal\s*[:.\-]\s*(?:₹|Rs\.?\s*|INR\s*)?([\d,]+\.?\d*)",
+            r"^(?:Total|Total\s*Amount)\s*[:.\-]?\s*(?:₹|Rs\.?\s*|INR\s*)?([\d,]+\.?\d*)",
         ],
         text,
     )
@@ -592,7 +679,7 @@ def extract_financials(text: str, line_items: List[Dict[str, Any]]) -> Dict[str,
     if items_total_qty == 0.0:
         extracted_qty = find_amount_regex(
             [
-                r"(?:Total\s*Qty|Total\s*Quantity|Quantity)\s*[:\-]?\s*([\d,]+\.?\d*)",
+                r"(?:Total\s*Qty|Total\s*Quantity|Quantity)\s*[:.\-]?\s*([\d,]+\.?\d*)",
             ],
             text,
         )
@@ -605,7 +692,7 @@ def extract_financials(text: str, line_items: List[Dict[str, Any]]) -> Dict[str,
     if subtotal is None:
         if items_total_sum > 0.0:
             subtotal = items_total_sum
-        elif total_amount is not None and tax_amount is not None:
+        elif total_amount is not None and tax_amount is not None and total_amount >= tax_amount:
             subtotal = round(total_amount - tax_amount + discount_amount, 2)
 
     # Derive Tax Components
@@ -691,7 +778,7 @@ def structured_to_flat_fields(
         "invoice_number": str(meta.get("invoice_number") or ""),
         "invoice_date": str(meta.get("invoice_date") or ""),
         "vendor_name": str(vendor.get("name") or ""),
-        "gstin": str(vendor.get("gstin") or ""),
+        "gstin": str(vendor.get("gstin") or buyer.get("gstin") or ""),
         "vendor_address": str(vendor.get("address") or ""),
         "extracted_vendor_state": str(vendor.get("state") or ""),
         "extracted_vendor_state_code": str(vendor.get("state_code") or ""),

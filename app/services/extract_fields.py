@@ -65,17 +65,27 @@ def extract_fields(ocr_text: str) -> Dict[str, Any]:
 
 
 def _legacy_extract_fields(ocr_text: str) -> Dict[str, Any]:
+    from app.services.parse_invoice import normalize_gstin
+    raw_gstin = _find_text(
+        [
+            r"(?:GSTIN(?:\s*/\s*UIN)?|GST\s*NO\.?|GST\s*NUMBER|GSTIN\s*NO\.?|G\.?S\.?T\.?I\.?N\.?|GST)\s*[:.\-]?\s*([0-9A-Za-z\s\-_]{14,24})",
+            r"\b([0-9OIZBS]{2}[\s\-_]*[A-Z0-9]{5}[\s\-_]*[0-9OIZBS]{4}[\s\-_]*[A-Z0-9]{1}[\s\-_]*[0-9A-Z]{1}[\s\-_]*[Z27S][\s\-_]*[0-9A-Z]{1})\b",
+        ],
+        ocr_text,
+        default="",
+    )
+    cleaned_gstin = normalize_gstin(raw_gstin) or ""
+
     fields: Dict[str, Any] = {
-        "gstin": _find_text(
-            r"\bGSTIN(?:\s*/?s*UIN)?\s*:?\s*([0-9A-Z]{15})",
-            ocr_text,
-            default="",
-        ),
+        "gstin": cleaned_gstin,
 
         "invoice_number": _find_text(
             [
-                r"(?:Invoice\s*(?:No\.?|Number|#))\s*:?\s*([A-Z0-9/\-]+)",
-                r"(?:Bill\s*(?:No\.?|Number|#))\s*:?\s*([A-Z0-9/\-]+)",
+                r"(?:Invoice\s*(?:No\.?|Num|Number|Na|N0|#|ID))\s*[:.\-]?\s*([A-Za-z0-9/\-_\.]+)",
+                r"(?:Bill\s*(?:No\.?|Num|Number|Na|N0|#|ID))\s*[:.\-]?\s*([A-Za-z0-9/\-_\.]+)",
+                r"(?:Tax\s*Invoice\s*(?:No\.?|Num|Number|#))\s*[:.\-]?\s*([A-Za-z0-9/\-_\.]+)",
+                r"(?:Inv\s*(?:No\.?|Num|#)?)\s*[:.\-]?\s*([A-Za-z0-9/\-_\.]+)",
+                r"\b(INV[\.\-/_]?[0-9A-Za-z\-_\.]+)",
             ],
             ocr_text,
             default="",
