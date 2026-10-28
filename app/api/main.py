@@ -23,6 +23,7 @@ from app.db import crud
 from app.services.ingest import (
     MAX_FILE_SIZE_MB,
     process_invoice,
+    process_upload_file,
     save_upload,
     validate_upload,
 )
@@ -133,9 +134,9 @@ async def upload_invoice(
             else pd.DataFrame()
         )
 
-    # -- Run pipeline -------------------------------------------------------
+    # -- Run pipeline (automatically separates multi-page PDFs into distinct invoices) --
     try:
-        result = process_invoice(saved_path, file.filename or "invoice", existing_df)
+        results = process_upload_file(saved_path, file.filename or "invoice", existing_df)
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -147,37 +148,66 @@ async def upload_invoice(
             detail=f"Processing error: {exc}",
         )
 
-    # -- Persist to DB or in-memory -----------------------------------------
-    invoice_id = None
-    if db is not None:
-        try:
-            saved_inv = crud.save_processed_invoice(db, result, str(saved_path))
-            invoice_id = saved_inv.invoice_id
-        except Exception as exc:
-            print(f"[Warning] Failed to persist invoice to DB, storing in-memory: {exc}")
-            _in_memory_invoices.append(result["validated"])
-    else:
-        _in_memory_invoices.append(result["validated"])
+    # -- Persist each detected invoice to DB or in-memory store -------------
+    invoices_list = []
+    for res in results:
+        inv_id = None
+        inv_file_path = str(res.get("file_path", saved_path))
+        if db is not None:
+            try:
+                saved_inv = crud.save_processed_invoice(db, res, inv_file_path)
+                inv_id = saved_inv.invoice_id
+            except Exception as exc:
+                print(f"[Warning] Failed to persist invoice to DB, storing in-memory: {exc}")
+                inv_id = len(_in_memory_invoices) + 1
+                res["validated"]["invoice_id"] = inv_id
+                res["validated"]["file_path"] = inv_file_path
+                res["validated"]["file_name"] = res.get("file_name")
+                _in_memory_invoices.append(res["validated"])
+        else:
+            inv_id = len(_in_memory_invoices) + 1
+            res["validated"]["invoice_id"] = inv_id
+            res["validated"]["file_path"] = inv_file_path
+            res["validated"]["file_name"] = res.get("file_name")
+            _in_memory_invoices.append(res["validated"])
 
-    return JSONResponse(content=jsonable_encoder({
+        res["invoice_id"] = inv_id
+
+        inv_dict = {
+            "invoice_id": inv_id,
+            "file_name": res["file_name"],
+            "page_number": res.get("page_number", 1),
+            "total_pages": res.get("total_pages", 1),
+            "page_count": res.get("page_count", 1),
+            "file_path": inv_file_path,
+            "file_bytes_base64": res.get("file_bytes_base64"),
+            "json_file_path": res.get("json_file_path"),
+            "structured_json": res.get("structured_json"),
+            "line_items": res.get("line_items", []),
+            "extracted_fields": res["extracted"],
+            "missing_fields": res["missing_fields"],
+            "rule_anomaly": res["validated"].get("rule_anomaly", False),
+            "rule_flags": res["validated"].get("rule_flags_text", ""),
+            "isolation_anomaly": res["validated"].get("isolation_anomaly", False),
+            "isolation_score": res["validated"].get("isolation_score"),
+            "model_input_invalid": res["validated"].get("model_input_invalid", False),
+            "final_anomaly": res["validated"].get("final_anomaly", False),
+            "review_status": res["validated"].get("review_status", ""),
+            "duplicates": res["duplicates"],
+            "ocr_text": res.get("ocr_text", ""),
+        }
+        invoices_list.append(inv_dict)
+
+    first_inv = invoices_list[0]
+    response_payload = {
         "status": "success",
-        "invoice_id": invoice_id,
-        "file_name": result["file_name"],
-        "page_count": result["page_count"],
-        "json_file_path": result.get("json_file_path"),
-        "structured_json": result.get("structured_json"),
-        "line_items": result.get("line_items", []),
-        "extracted_fields": result["extracted"],
-        "missing_fields": result["missing_fields"],
-        "rule_anomaly": result["validated"].get("rule_anomaly", False),
-        "rule_flags": result["validated"].get("rule_flags_text", ""),
-        "isolation_anomaly": result["validated"].get("isolation_anomaly", False),
-        "isolation_score": result["validated"].get("isolation_score"),
-        "model_input_invalid": result["validated"].get("model_input_invalid", False),
-        "final_anomaly": result["validated"].get("final_anomaly", False),
-        "review_status": result["validated"].get("review_status", ""),
-        "duplicates": result["duplicates"],
-    }))
+        "total_invoices": len(invoices_list),
+        "is_multi_invoice": len(invoices_list) > 1,
+        "invoices": invoices_list,
+        **first_inv,
+    }
+
+    return JSONResponse(content=jsonable_encoder(response_payload))
 
 
 @app.post("/process-text", tags=["invoices"])
@@ -218,10 +248,13 @@ def process_text_endpoint(
     else:
         _in_memory_invoices.append(result["validated"])
 
-    return JSONResponse(content=jsonable_encoder({
-        "status": "success",
+    inv_dict = {
         "invoice_id": invoice_id,
         "file_name": result["file_name"],
+        "page_number": 1,
+        "total_pages": 1,
+        "page_count": result.get("page_count", 1),
+        "file_path": result.get("file_path"),
         "json_file_path": result.get("json_file_path"),
         "structured_json": result.get("structured_json"),
         "line_items": result.get("line_items", []),
@@ -235,6 +268,15 @@ def process_text_endpoint(
         "final_anomaly": result["validated"].get("final_anomaly", False),
         "review_status": result["validated"].get("review_status", ""),
         "duplicates": result["duplicates"],
+        "ocr_text": result.get("ocr_text", ""),
+    }
+
+    return JSONResponse(content=jsonable_encoder({
+        "status": "success",
+        "total_invoices": 1,
+        "is_multi_invoice": False,
+        "invoices": [inv_dict],
+        **inv_dict,
     }))
 
 
@@ -275,10 +317,13 @@ def process_json_endpoint(
     else:
         _in_memory_invoices.append(result["validated"])
 
-    return JSONResponse(content=jsonable_encoder({
-        "status": "success",
+    inv_dict = {
         "invoice_id": invoice_id,
         "file_name": result["file_name"],
+        "page_number": 1,
+        "total_pages": 1,
+        "page_count": result.get("page_count", 1),
+        "file_path": result.get("file_path"),
         "json_file_path": result.get("json_file_path"),
         "structured_json": result.get("structured_json"),
         "line_items": result.get("line_items", []),
@@ -292,6 +337,15 @@ def process_json_endpoint(
         "final_anomaly": result["validated"].get("final_anomaly", False),
         "review_status": result["validated"].get("review_status", ""),
         "duplicates": result["duplicates"],
+        "ocr_text": result.get("ocr_text", ""),
+    }
+
+    return JSONResponse(content=jsonable_encoder({
+        "status": "success",
+        "total_invoices": 1,
+        "is_multi_invoice": False,
+        "invoices": [inv_dict],
+        **inv_dict,
     }))
 
 
@@ -413,20 +467,36 @@ def get_invoice_file(
     db: Optional[Session] = Depends(get_db),
 ):
     """Retrieve the original uploaded invoice file."""
-    if db is None:
-        raise HTTPException(status_code=503, detail="Database not connected.")
+    file_p: Optional[Path] = None
+    filename: Optional[str] = None
 
-    from app.db.models import Invoice
-    invoice = db.get(Invoice, invoice_id)
-    if not invoice or not invoice.file_path:
-        raise HTTPException(status_code=404, detail="Invoice or file record not found.")
+    if db is not None:
+        try:
+            from app.db.models import Invoice
+            invoice = db.get(Invoice, invoice_id)
+            if invoice and invoice.file_path:
+                p = Path(invoice.file_path)
+                if p.exists():
+                    file_p = p
+                    filename = invoice.file_name or p.name
+        except Exception as exc:
+            print(f"[Warning] DB error fetching invoice file: {exc}")
 
-    file_p = Path(invoice.file_path)
-    if not file_p.exists():
-        raise HTTPException(status_code=404, detail="Original invoice file missing on server disk.")
+    if file_p is None:
+        # Check in-memory store
+        for inv in _in_memory_invoices:
+            if inv.get("invoice_id") == invoice_id and inv.get("file_path"):
+                p = Path(inv["file_path"])
+                if p.exists():
+                    file_p = p
+                    filename = inv.get("file_name") or p.name
+                    break
+
+    if not file_p or not file_p.exists():
+        raise HTTPException(status_code=404, detail="Invoice file not found on server disk.")
 
     return FileResponse(
         path=str(file_p),
-        filename=invoice.file_name or file_p.name,
+        filename=filename or file_p.name,
     )
 

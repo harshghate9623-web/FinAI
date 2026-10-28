@@ -90,6 +90,22 @@ st.markdown(
         background-color: var(--secondary-background-color);
         margin-bottom: 1rem;
     }
+    .invoice-selector-box {
+        background: linear-gradient(135deg, rgba(13, 110, 253, 0.08) 0%, rgba(13, 110, 253, 0.02) 100%);
+        border: 1px solid rgba(13, 110, 253, 0.35);
+        border-radius: 10px;
+        padding: 0.75rem 1rem;
+        margin-bottom: 0.5rem;
+    }
+    .invoice-badge-count {
+        display: inline-block;
+        background-color: #0d6efd;
+        color: white;
+        font-size: 0.8rem;
+        font-weight: 600;
+        padding: 0.15rem 0.65rem;
+        border-radius: 12px;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -141,6 +157,8 @@ with st.sidebar:
 # ---------------------------------------------------------------------------
 if "invoice_result" not in st.session_state:
     st.session_state["invoice_result"] = None
+if "selected_invoice_idx" not in st.session_state:
+    st.session_state["selected_invoice_idx"] = 0
 if "uploaded_file_bytes" not in st.session_state:
     st.session_state["uploaded_file_bytes"] = None
 if "uploaded_file_name" not in st.session_state:
@@ -176,9 +194,14 @@ if input_mode == "📁 Upload Invoice / OCR File":
                     )
                     if response.ok:
                         st.session_state["invoice_result"] = response.json()
+                        st.session_state["selected_invoice_idx"] = 0
                         st.session_state["uploaded_file_bytes"] = file_bytes
                         st.session_state["uploaded_file_name"] = uploaded_file.name
-                        st.success("Invoice analyzed and persisted to database!")
+                        total_invs = st.session_state["invoice_result"].get("total_invoices", 1)
+                        if total_invs > 1:
+                            st.success(f"Multi-invoice PDF detected! Separated {total_invs} pages into distinct invoices.")
+                        else:
+                            st.success("Invoice analyzed and persisted to database!")
                     else:
                         st.error(f"API error {response.status_code}: {response.text}")
                 except requests.exceptions.ConnectionError:
@@ -205,6 +228,7 @@ else:
                     )
                     if response.ok:
                         st.session_state["invoice_result"] = response.json()
+                        st.session_state["selected_invoice_idx"] = 0
                         st.session_state["uploaded_file_bytes"] = pasted_text.encode("utf-8")
                         st.session_state["uploaded_file_name"] = custom_filename or "pasted_invoice_ocr.txt"
                         st.success("Plain text parsed and saved to database!")
@@ -323,21 +347,52 @@ def render_bill_preview(file_bytes: bytes, file_name: str):
 data = st.session_state["invoice_result"]
 
 if data:
-    fields = data.get("extracted_fields", {})
-    status_val = data.get("review_status", "Pending Review")
-    inv_id = data.get("invoice_id")
-    file_name = st.session_state.get("uploaded_file_name") or data.get("file_name") or "invoice"
-    file_bytes = st.session_state.get("uploaded_file_bytes")
+    # Handle both multi-invoice array and legacy single-invoice payload
+    invoices = data.get("invoices")
+    if not invoices or not isinstance(invoices, list):
+        invoices = [data]
 
-    # If bytes not in session state but we have an invoice_id, attempt to fetch from backend
+    total_detected = len(invoices)
+
+    # Ensure selected index is valid
+    if "selected_invoice_idx" not in st.session_state or st.session_state["selected_invoice_idx"] >= total_detected:
+        st.session_state["selected_invoice_idx"] = 0
+
+    selected_idx = st.session_state["selected_invoice_idx"]
+    current_invoice = invoices[selected_idx]
+
+    fields = current_invoice.get("extracted_fields") or current_invoice
+    status_val = current_invoice.get("review_status", "Pending Review")
+    inv_id = current_invoice.get("invoice_id")
+    file_name = current_invoice.get("file_name") or st.session_state.get("uploaded_file_name") or "invoice"
+    page_num = current_invoice.get("page_number", selected_idx + 1)
+
+    # Resolve document bytes for currently selected invoice
+    file_bytes = None
+    if current_invoice.get("file_bytes_base64"):
+        try:
+            file_bytes = base64.b64decode(current_invoice["file_bytes_base64"])
+        except Exception:
+            pass
+
+    if file_bytes is None and current_invoice.get("file_path"):
+        fp = Path(current_invoice["file_path"])
+        if fp.exists():
+            try:
+                file_bytes = fp.read_bytes()
+            except Exception:
+                pass
+
     if file_bytes is None and inv_id:
         try:
             f_resp = requests.get(f"{API_BASE}/invoices/{inv_id}/file", timeout=5)
             if f_resp.ok:
                 file_bytes = f_resp.content
-                st.session_state["uploaded_file_bytes"] = file_bytes
         except Exception:
             pass
+
+    if file_bytes is None:
+        file_bytes = st.session_state.get("uploaded_file_bytes")
 
     total_val = fields.get("total_amount")
     total_str = f"₹{float(total_val):,.2f}" if total_val is not None else "N/A"
@@ -345,14 +400,25 @@ if data:
     st.markdown("---")
 
     # =========================================================================
-    # 🎯 MAIN RESULT — CENTERED
+    # 🎯 MIDDLE SCREEN: Primary Review Outcome (Left) & Detected Invoice Selector (Right)
     # =========================================================================
-    left_spacer, center_col, right_spacer = st.columns([1, 8, 1])
+    mid_header_left, mid_header_right = st.columns([5, 4], gap="large")
 
-    with center_col:
-        st.markdown("<h2 style='text-align: center; margin-bottom: 0.5rem;'>🎯 Primary Review Outcome</h2>", unsafe_allow_html=True)
+    with mid_header_left:
+        st.markdown("<h2 style='margin-bottom: 0.2rem;'>🎯 Primary Review Outcome</h2>", unsafe_allow_html=True)
 
-        # Centered Status Badge
+        if total_detected > 1:
+            st.markdown(
+                f"<div style='margin-bottom: 0.75rem; font-size: 0.95rem; color: #0d6efd; font-weight: 500;'>"
+                f"📑 <strong>Multi-Invoice Document:</strong> Viewing <strong>Invoice {selected_idx + 1} of {total_detected}</strong> "
+                f"(Page {page_num})"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.caption("Standard single invoice verification result.")
+
+        # Status badge for currently selected invoice
         if status_val in ["Checked", "Passed Initial Checks"]:
             badge_class = "status-passed"
             badge_icon = "✅"
@@ -366,53 +432,117 @@ if data:
         id_str = f"Invoice #{inv_id} &bull; " if inv_id else ""
         st.markdown(
             f"""
-            <div style="text-align: center; margin-bottom: 1.25rem;">
+            <div style="margin-bottom: 0.85rem;">
                 <span class="status-badge {badge_class}">{badge_icon} {id_str}{status_val}</span>
             </div>
             """,
             unsafe_allow_html=True,
         )
 
-        # High-level Metrics Row in Center
-        m1, m2, m3, m4 = st.columns(4)
-        with m1:
-            st.metric("Total Amount", total_str, help="Invoice Grand Total")
-        with m2:
-            st.metric("Rule Validation", "Passed ✅" if not data.get("rule_anomaly") else "Flagged ❌")
-        with m3:
-            st.metric("ML Anomaly Check", "Normal ✅" if not data.get("isolation_anomaly") else "Outlier ❌")
-        with m4:
-            dups = data.get("duplicates", [])
-            st.metric("Duplicate Check", "Clear ✅" if not dups else f"{len(dups)} Match(es) ⚠️")
+    with mid_header_right:
+        # RIGHT SIDE OF THE MIDDLE SCREEN: The Detected Invoice Option Selector
+        st.markdown(
+            f"""
+            <div class="invoice-selector-box">
+                <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.25rem;">
+                    <span style="font-weight: 700; font-size: 1.05rem; color: var(--text-color, inherit);">📑 Select Detected Invoice</span>
+                    <span class="invoice-badge-count">{total_detected} Detected</span>
+                </div>
+                <div style="font-size: 0.84rem; color: #6c757d; margin-bottom: 0.4rem;">
+                    Select an invoice to inspect its individual validation, preview, and findings:
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-        # ---------------------------------------------------------------------
-        # Organised List of Detected Anomalies
-        # ---------------------------------------------------------------------
-        st.markdown("### 🔍 Anomaly & Findings Breakdown")
-        anomalies_list = extract_anomalies_list(data)
+        def format_invoice_option(idx: int) -> str:
+            inv_item = invoices[idx]
+            p_num = inv_item.get("page_number", idx + 1)
+            f_item = inv_item.get("extracted_fields") or inv_item
+            inv_no = f_item.get("invoice_number") or "N/A"
+            v_name = f_item.get("vendor_name") or "Unknown Vendor"
+            v_clean = (v_name[:18] + "...") if len(v_name) > 20 else v_name
+            tot = f_item.get("total_amount")
+            tot_str = f"₹{float(tot):,.2f}" if tot is not None else "₹0.00"
+            stat = inv_item.get("review_status", "")
+            icon = "✅" if stat in ["Checked", "Passed Initial Checks"] and not inv_item.get("final_anomaly") else ("⚠️" if inv_item.get("final_anomaly") or "Review" in stat or "Flagged" in stat else "📄")
+            return f"{icon} Page {p_num}: {v_clean} (Inv #{inv_no}) — {tot_str}"
 
-        if anomalies_list:
-            st.markdown(f"**Total Flags Identified:** `{len(anomalies_list)}`")
-            for idx, item in enumerate(anomalies_list, start=1):
+        selected_dropdown = st.selectbox(
+            "Select Detected Invoice:",
+            options=list(range(total_detected)),
+            index=selected_idx,
+            format_func=format_invoice_option,
+            key="detected_invoice_selector_dropdown",
+            label_visibility="collapsed",
+        )
+
+        if selected_dropdown != selected_idx:
+            st.session_state["selected_invoice_idx"] = selected_dropdown
+            st.rerun()
+
+        if total_detected > 1:
+            nav_c1, nav_c2, nav_c3 = st.columns([1, 2, 1])
+            with nav_c1:
+                if st.button("◀ Prev", disabled=(selected_idx == 0), key="prev_inv_btn", use_container_width=True):
+                    st.session_state["selected_invoice_idx"] = max(0, selected_idx - 1)
+                    st.rerun()
+            with nav_c2:
                 st.markdown(
-                    f"""
-                    <div class="anomaly-card">
-                        <div class="anomaly-title">{item['icon']} #{idx} [{item['category']}] — {item['title']}</div>
-                        <div class="anomaly-desc">{item['detail']}</div>
-                    </div>
-                    """,
+                    f"<div style='text-align: center; font-size: 0.85rem; padding-top: 0.4rem; color: #6c757d;'>"
+                    f"Invoice {selected_idx + 1} of {total_detected}"
+                    f"</div>",
                     unsafe_allow_html=True,
                 )
-        else:
+            with nav_c3:
+                if st.button("Next ▶", disabled=(selected_idx == total_detected - 1), key="next_inv_btn", use_container_width=True):
+                    st.session_state["selected_invoice_idx"] = min(total_detected - 1, selected_idx + 1)
+                    st.rerun()
+
+    # -------------------------------------------------------------------------
+    # Middle Screen Metrics & Anomaly Breakdown for Selected Invoice
+    # -------------------------------------------------------------------------
+    st.markdown("<div style='height: 4px;'></div>", unsafe_allow_html=True)
+    m1, m2, m3, m4 = st.columns(4)
+    with m1:
+        st.metric("Total Amount", total_str, help="Invoice Grand Total for this detected invoice")
+    with m2:
+        st.metric("Rule Validation", "Passed ✅" if not current_invoice.get("rule_anomaly") else "Flagged ❌")
+    with m3:
+        st.metric("ML Anomaly Check", "Normal ✅" if not current_invoice.get("isolation_anomaly") else "Outlier ❌")
+    with m4:
+        dups = current_invoice.get("duplicates", [])
+        st.metric("Duplicate Check", "Clear ✅" if not dups else f"{len(dups)} Match(es) ⚠️")
+
+    # -------------------------------------------------------------------------
+    # Organised List of Detected Anomalies for Selected Invoice
+    # -------------------------------------------------------------------------
+    st.markdown("### 🔍 Anomaly & Findings Breakdown")
+    anomalies_list = extract_anomalies_list(current_invoice)
+
+    if anomalies_list:
+        st.markdown(f"**Total Flags Identified for this Invoice:** `{len(anomalies_list)}`")
+        for idx_item, item in enumerate(anomalies_list, start=1):
             st.markdown(
-                """
-                <div class="anomaly-clean">
-                    <strong>🎉 Zero Anomalies Detected!</strong><br>
-                    <span>This invoice satisfies all statutory GST arithmetic checks, matches normal statistical distributions, and has no registered duplicate records in the database.</span>
+                f"""
+                <div class="anomaly-card">
+                    <div class="anomaly-title">{item['icon']} #{idx_item} [{item['category']}] — {item['title']}</div>
+                    <div class="anomaly-desc">{item['detail']}</div>
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
+    else:
+        st.markdown(
+            """
+            <div class="anomaly-clean">
+                <strong>🎉 Zero Anomalies Detected!</strong><br>
+                <span>This invoice satisfies all statutory GST arithmetic checks, matches normal statistical distributions, and has no registered duplicate records in the database.</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
     # =========================================================================
     # 📄 DOCUMENT REVIEW & ACTIONS (Left) + 📦 DATA & MINIMISED FIELDS (Right)
@@ -421,11 +551,14 @@ if data:
     col_bill_review, col_data_view = st.columns([1, 1], gap="large")
 
     # -------------------------------------------------------------------------
-    # LEFT COLUMN: Bill Preview & Review Action Buttons
+    # LEFT COLUMN: Bill Preview & Review Action Buttons for Selected Invoice
     # -------------------------------------------------------------------------
     with col_bill_review:
         st.subheader("📄 Invoice Bill Document")
-        st.caption(f"Review document: **{file_name}**")
+        if total_detected > 1:
+            st.caption(f"Review document: **{file_name}** &bull; **Invoice {selected_idx + 1} of {total_detected} (Page {page_num})**")
+        else:
+            st.caption(f"Review document: **{file_name}**")
 
         # Render the bill
         if file_bytes:
@@ -435,12 +568,12 @@ if data:
 
         # Action Buttons Directly Below the Bill
         st.markdown("#### ✍️ Human Review Decision")
-        st.write("Confirm invoice verification or flag for further auditing:")
+        st.write(f"Confirm verification or flag **Invoice #{inv_id or (selected_idx + 1)}** for further auditing:")
 
         btn_col1, btn_col2 = st.columns(2)
 
         with btn_col1:
-            if st.button("⚠️ Mark as review", type="secondary", use_container_width=True):
+            if st.button("⚠️ Mark as review", type="secondary", use_container_width=True, key=f"btn_review_{selected_idx}"):
                 new_status = "Marked for Review"
                 if inv_id:
                     try:
@@ -450,20 +583,23 @@ if data:
                             timeout=8,
                         )
                         if res.ok:
-                            st.session_state["invoice_result"]["review_status"] = new_status
-                            st.toast("⚠️ Status updated to 'Marked for Review' in PostgreSQL database!", icon="⚠️")
-                            st.rerun()
+                            st.toast(f"⚠️ Invoice #{inv_id} status updated to 'Marked for Review' in database!", icon="⚠️")
                         else:
                             st.error(f"Failed to update database: {res.text}")
                     except Exception as err:
                         st.error(f"API request failed: {err}")
                 else:
+                    st.toast(f"Updated Invoice #{selected_idx + 1} review status in-memory", icon="⚠️")
+
+                current_invoice["review_status"] = new_status
+                if "invoices" in st.session_state["invoice_result"]:
+                    st.session_state["invoice_result"]["invoices"][selected_idx]["review_status"] = new_status
+                if selected_idx == 0:
                     st.session_state["invoice_result"]["review_status"] = new_status
-                    st.toast("Updated review status in-memory", icon="⚠️")
-                    st.rerun()
+                st.rerun()
 
         with btn_col2:
-            if st.button("✅ Checked", type="primary", use_container_width=True):
+            if st.button("✅ Checked", type="primary", use_container_width=True, key=f"btn_checked_{selected_idx}"):
                 new_status = "Checked"
                 if inv_id:
                     try:
@@ -473,49 +609,54 @@ if data:
                             timeout=8,
                         )
                         if res.ok:
-                            st.session_state["invoice_result"]["review_status"] = new_status
-                            st.toast("✅ Status updated to 'Checked' in PostgreSQL database!", icon="✅")
-                            st.rerun()
+                            st.toast(f"✅ Invoice #{inv_id} status updated to 'Checked' in database!", icon="✅")
                         else:
                             st.error(f"Failed to update database: {res.text}")
                     except Exception as err:
                         st.error(f"API request failed: {err}")
                 else:
+                    st.toast(f"Updated Invoice #{selected_idx + 1} review status in-memory", icon="✅")
+
+                current_invoice["review_status"] = new_status
+                if "invoices" in st.session_state["invoice_result"]:
+                    st.session_state["invoice_result"]["invoices"][selected_idx]["review_status"] = new_status
+                if selected_idx == 0:
                     st.session_state["invoice_result"]["review_status"] = new_status
-                    st.toast("Updated review status in-memory", icon="✅")
-                    st.rerun()
+                st.rerun()
 
         # Download bill button
         if file_bytes:
             st.download_button(
-                "📥 Download Original Bill File",
+                f"📥 Download Invoice Bill File ({file_name})",
                 data=file_bytes,
                 file_name=file_name,
                 use_container_width=True,
+                key=f"dl_bill_btn_{selected_idx}",
             )
 
     # -------------------------------------------------------------------------
-    # RIGHT COLUMN: Structured Data & Minimized Extracted Fields (Bottom-Right)
+    # RIGHT COLUMN: Structured Data & Minimized Extracted Fields for Selected Invoice
     # -------------------------------------------------------------------------
     with col_data_view:
         st.subheader("📦 Parsed Data & Export")
 
-        struct_json = data.get("structured_json")
+        struct_json = current_invoice.get("structured_json")
         json_bytes = json.dumps(struct_json, indent=2, ensure_ascii=False) if struct_json else ""
 
         if json_bytes:
             st.download_button(
-                "⬇️ Download Structured JSON",
+                f"⬇️ Download Structured JSON (Invoice #{inv_id or (selected_idx + 1)})",
                 data=json_bytes,
                 file_name=f"{str(file_name).replace('.txt', '').replace('.pdf', '')}_extracted.json",
                 mime="application/json",
                 use_container_width=True,
+                key=f"dl_json_btn_{selected_idx}",
             )
 
         tab_items, tab_json, tab_ocr = st.tabs(["📑 Parsed Line Items", "📄 Structured JSON", "📝 Raw OCR Text"])
 
         with tab_items:
-            line_items = data.get("line_items", [])
+            line_items = current_invoice.get("line_items", [])
             if line_items:
                 df_items = pd.DataFrame(line_items)
                 st.dataframe(df_items, use_container_width=True, height=280)
@@ -529,8 +670,8 @@ if data:
                 st.info("No structured JSON available.")
 
         with tab_ocr:
-            ocr_text = fields.get("ocr_text", "") or data.get("ocr_text", "")
-            st.text_area("Raw Extracted OCR Text", value=ocr_text, height=260, disabled=True)
+            ocr_text = fields.get("ocr_text", "") or current_invoice.get("ocr_text", "")
+            st.text_area("Raw Extracted OCR Text", value=ocr_text, height=260, disabled=True, key=f"ocr_text_area_{selected_idx}")
 
         # Minimized Extracted Fields in Bottom Right Corner
         st.markdown("---")
@@ -562,5 +703,5 @@ if data:
 
             st.dataframe(pd.DataFrame(field_records), hide_index=True, use_container_width=True)
 
-            if data.get("missing_fields"):
-                st.warning("⚠️ Incomplete fields: " + ", ".join(data["missing_fields"]))
+            if current_invoice.get("missing_fields"):
+                st.warning("⚠️ Incomplete fields: " + ", ".join(current_invoice["missing_fields"]))

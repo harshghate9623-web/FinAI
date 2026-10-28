@@ -6,6 +6,7 @@ Orchestrates the full invoice processing pipeline:
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import uuid
@@ -14,7 +15,7 @@ from typing import Any, Dict, List, Optional, Union
 
 import pandas as pd
 
-from app.services.ocr import extract_text, SUPPORTED_EXTENSIONS
+from app.services.ocr import extract_text, split_pdf_to_pages, SUPPORTED_EXTENSIONS
 from app.services.parse_invoice import (
     parse_invoice_to_json,
     save_structured_json,
@@ -301,3 +302,100 @@ def process_structured_json(
         existing_invoices=existing_invoices,
         output_json_path=output_json_path or json_path,
     )
+
+
+def process_upload_file(
+    file_path: Path | str,
+    original_filename: str,
+    existing_invoices: pd.DataFrame | None = None,
+    split_multipage_pdf: bool = True,
+) -> List[Dict[str, Any]]:
+    """
+    Process an uploaded file. If the file is a multi-page PDF, split each page into
+    a separate invoice document, perform OCR/text extraction per page, and run each
+    distinct invoice through the parsing, validation, anomaly scoring, and duplicate pipeline.
+
+    Returns a list of pipeline results (one for each detected invoice/page).
+    """
+    path = Path(file_path)
+    ext = path.suffix.lower()
+
+    # Track running existing_invoices so subsequent pages in the same batch can be checked
+    running_existing = (
+        existing_invoices.copy()
+        if existing_invoices is not None and not existing_invoices.empty
+        else pd.DataFrame()
+    )
+
+    if ext == ".pdf" and split_multipage_pdf:
+        page_items = split_pdf_to_pages(path, UPLOAD_DIR)
+        num_detected = len(page_items)
+
+        if num_detected > 1:
+            results: List[Dict[str, Any]] = []
+            for page_path, page_num in page_items:
+                orig_stem = Path(original_filename).stem
+                page_display_name = f"{orig_stem}_Page_{page_num}.pdf"
+
+                # Run the standard pipeline on this page
+                res = process_invoice(
+                    file_path=page_path,
+                    original_filename=page_display_name,
+                    existing_invoices=running_existing,
+                )
+
+                # Read page bytes for direct UI rendering
+                try:
+                    p_bytes = page_path.read_bytes()
+                    res["file_bytes_base64"] = base64.b64encode(p_bytes).decode("utf-8")
+                except Exception:
+                    res["file_bytes_base64"] = None
+
+                res["page_number"] = page_num
+                res["total_pages"] = num_detected
+                res["is_multipage"] = True
+                res["parent_file_name"] = original_filename
+                res["parent_file_path"] = str(path)
+
+                # Add to running existing invoices for cross-page duplicate detection
+                new_row = pd.DataFrame([{
+                    "invoice_number": res["extracted"].get("invoice_number", ""),
+                    "gstin": res["extracted"].get("gstin", ""),
+                    "invoice_date": str(res["extracted"].get("invoice_date", "")),
+                    "total_amount": float(res["extracted"].get("total_amount") or 0.0),
+                    "vendor_name": res["extracted"].get("vendor_name", ""),
+                    "subtotal": float(res["extracted"].get("subtotal") or 0.0),
+                    "cgst_amount": float(res["extracted"].get("cgst_amount") or 0.0),
+                    "sgst_amount": float(res["extracted"].get("sgst_amount") or 0.0),
+                    "igst_amount": float(res["extracted"].get("igst_amount") or 0.0),
+                    "tax_amount": float(res["extracted"].get("tax_amount") or 0.0),
+                    "discount_amount": float(res["extracted"].get("discount_amount") or 0.0),
+                    "quantity": float(res["extracted"].get("quantity") or 0.0),
+                    "item_count": res["extracted"].get("item_count", 0),
+                    "review_status": res["validated"].get("review_status", ""),
+                    "file_name": page_display_name,
+                }])
+                running_existing = pd.concat([running_existing, new_row], ignore_index=True)
+
+                results.append(res)
+            return results
+
+    # Single-page PDF, image, txt, or json
+    single_res = process_invoice(
+        file_path=path,
+        original_filename=original_filename,
+        existing_invoices=existing_invoices,
+    )
+    try:
+        f_bytes = path.read_bytes()
+        single_res["file_bytes_base64"] = base64.b64encode(f_bytes).decode("utf-8")
+    except Exception:
+        single_res["file_bytes_base64"] = None
+
+    single_res["page_number"] = 1
+    single_res["total_pages"] = 1
+    single_res["is_multipage"] = False
+    single_res["parent_file_name"] = original_filename
+    single_res["parent_file_path"] = str(path)
+
+    return [single_res]

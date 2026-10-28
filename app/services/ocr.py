@@ -6,18 +6,20 @@ and Tesseract OCR with automatic Windows path discovery.
 
 from __future__ import annotations
 
+import io
 import os
 import shutil
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from PIL import Image, ImageEnhance, ImageOps
 import pytesseract
 
 try:
-    from pypdf import PdfReader
+    from pypdf import PdfReader, PdfWriter
 except ImportError:
     PdfReader = None
+    PdfWriter = None
 
 SUPPORTED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tiff", ".bmp", ".webp"}
 SUPPORTED_DOCUMENT_EXTENSIONS = {".pdf", ".txt", ".json"}
@@ -76,10 +78,62 @@ def _extract_pdf_digital_text(file_path: Path) -> Tuple[str, int]:
         return "", 0
 
 
+def get_pdf_page_count(file_path: str | Path) -> int:
+    """Return the number of pages in a PDF file."""
+    path = Path(file_path)
+    if path.suffix.lower() != ".pdf" or PdfReader is None:
+        return 1
+    try:
+        reader = PdfReader(str(path))
+        return len(reader.pages)
+    except Exception:
+        return 1
+
+
+def split_pdf_to_pages(file_path: str | Path, output_dir: Optional[Path] = None) -> List[Tuple[Path, int]]:
+    """
+    Split a multi-page PDF into single-page PDF files.
+    Returns a list of (page_file_path, page_number_1_indexed).
+    If the file is not a PDF, or has only 1 page, returns [(Path(file_path), 1)].
+    """
+    path = Path(file_path)
+    if path.suffix.lower() != ".pdf" or PdfReader is None:
+        return [(path, 1)]
+
+    try:
+        reader = PdfReader(str(path))
+        num_pages = len(reader.pages)
+        if num_pages <= 1:
+            return [(path, 1)]
+
+        if PdfWriter is None:
+            return [(path, 1)]
+
+        out_dir = Path(output_dir) if output_dir else path.parent
+        out_dir.mkdir(parents=True, exist_ok=True)
+        base_stem = path.stem
+        page_results: List[Tuple[Path, int]] = []
+
+        for idx, page in enumerate(reader.pages):
+            page_num = idx + 1
+            writer = PdfWriter()
+            writer.add_page(page)
+            page_file = out_dir / f"{base_stem}_page_{page_num}.pdf"
+            with open(page_file, "wb") as f_out:
+                writer.write(f_out)
+            page_results.append((page_file, page_num))
+
+        return page_results
+    except Exception as exc:
+        print(f"[Warning] PDF splitting failed: {exc}, using whole file")
+        return [(path, 1)]
+
+
 def render_pages(file_path: str | Path, dpi: int = 300) -> List[Image.Image]:
     """
     Return a list of PIL Images — one per page.
-    Supports PDF (via pdf2image) and common image formats.
+    Supports PDF (via pdf2image with fallback to pypdf embedded image extraction)
+    and common image formats.
     """
     path = Path(file_path)
     ext = path.suffix.lower()
@@ -94,6 +148,18 @@ def render_pages(file_path: str | Path, dpi: int = 300) -> List[Image.Image]:
             from pdf2image import convert_from_path
             return convert_from_path(str(path), dpi=dpi)
         except Exception as exc:
+            # Fallback: attempt to extract raw embedded images from the PDF using pypdf
+            if PdfReader is not None:
+                try:
+                    reader = PdfReader(str(path))
+                    extracted_imgs: List[Image.Image] = []
+                    for page in reader.pages:
+                        for img in page.images:
+                            extracted_imgs.append(Image.open(io.BytesIO(img.data)).convert("RGB"))
+                    if extracted_imgs:
+                        return extracted_imgs
+                except Exception:
+                    pass
             raise RuntimeError(
                 f"PDF to image conversion failed. Ensure Poppler is installed on your system: {exc}"
             )
