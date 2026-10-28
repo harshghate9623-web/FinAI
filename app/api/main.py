@@ -63,10 +63,22 @@ def on_startup() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Health check
+# Root & Health check
 # ---------------------------------------------------------------------------
 
-@app.get("/health", tags=["system"])
+@app.api_route("/", methods=["GET", "HEAD"], tags=["system"])
+def root() -> Dict[str, Any]:
+    """Root endpoint for deployment health checks (Render/AWS/GCP) and service info."""
+    return {
+        "status": "ok",
+        "service": "FinDoc AI API",
+        "version": "0.1.0",
+        "docs": "/docs",
+        "health": "/health",
+    }
+
+
+@app.api_route("/health", methods=["GET", "HEAD"], tags=["system"])
 def health() -> Dict[str, Any]:
     from app.services.gemini_extractor import is_gemini_available
     db_ok = is_db_connected()
