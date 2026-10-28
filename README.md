@@ -85,8 +85,18 @@ cp .env.example .env
 ```
 
 ### 3. Running Locally
-Start the FastAPI backend and Streamlit dashboard:
+You can run both services together with a single command, or run them in separate terminals:
 
+**Option A: Single command (Recommended)**
+```bash
+# From findoc-ai/ directory with venv activated:
+python run_app.py
+
+# Or on Windows, double-click:
+start_local.bat
+```
+
+**Option B: Separate terminals**
 ```bash
 # Terminal 1: Start FastAPI backend (Port 8000)
 uvicorn app.api.main:app --host 0.0.0.0 --port 8000 --reload
