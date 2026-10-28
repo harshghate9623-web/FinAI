@@ -68,11 +68,15 @@ def on_startup() -> None:
 
 @app.get("/health", tags=["system"])
 def health() -> Dict[str, Any]:
+    from app.services.gemini_extractor import is_gemini_available
     db_ok = is_db_connected()
+    gemini_on = is_gemini_available()
     return {
         "status": "ok",
         "version": "0.1.0",
         "database": "connected" if db_ok else "in_memory_fallback",
+        "gemini_active": gemini_on,
+        "engine": "Gemini Vision (AI)" if gemini_on else "Tesseract OCR",
     }
 
 

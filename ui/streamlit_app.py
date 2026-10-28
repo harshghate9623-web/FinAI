@@ -125,6 +125,11 @@ with st.sidebar:
             info = resp.json()
             st.success("API Online ✅")
             st.caption(f"Database: **{info.get('database', 'connected')}**")
+            engine_name = info.get("engine", "Tesseract OCR")
+            if "Gemini" in engine_name:
+                st.caption(f"Engine: **{engine_name}** 🚀")
+            else:
+                st.caption(f"Engine: **{engine_name}**")
         else:
             st.error("API returned an error")
     except requests.exceptions.ConnectionError:

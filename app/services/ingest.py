@@ -27,6 +27,7 @@ from app.services.extract_fields import get_missing_fields
 from app.services.validate_invoice import validate_single
 from app.services.anomaly import get_detector
 from app.services.duplicates import find_near_duplicates, find_exact_duplicates, DuplicateMatch
+from app.services.gemini_extractor import is_gemini_available, extract_invoice_with_gemini
 
 # Upload directory (override via env var)
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "uploads"))
@@ -123,35 +124,59 @@ def process_invoice(
 
     # Case B: Input is PDF, image, or .txt (OCR plain text)
     else:
-        # 1. OCR / text extraction
-        ocr_text, page_count = extract_text(path)
+        gemini_res = None
+        if is_gemini_available():
+            try:
+                gemini_res = extract_invoice_with_gemini(
+                    path,
+                    original_filename=original_filename,
+                )
+            except Exception as exc:
+                print(f"[Warning] Gemini extraction failed, falling back to local OCR: {exc}")
 
-        if not ocr_text.strip():
-            raise ValueError("OCR returned no readable text. Try a clearer image or PDF.")
+        if gemini_res:
+            structured_json = gemini_res["structured_json"]
+            fields = gemini_res["flat_fields"]
+            json_str = gemini_res["json_str"]
+            ocr_text = gemini_res["ocr_text"]
+            page_count = fields.get("page_count", 1)
 
-        if page_count > MAX_PAGES:
-            raise ValueError(
-                f"Document has {page_count} pages, which exceeds the limit of {MAX_PAGES}."
-            )
+            if output_json_path:
+                out_json_path = Path(output_json_path)
+            else:
+                out_json_path = path.parent / f"{path.stem}_extracted.json"
+            save_structured_json(structured_json, out_json_path)
 
-        # 2. Parse extracted plain text into organized JSON
-        parse_res = parse_invoice_to_json(
-            ocr_text,
-            file_name=original_filename,
-            file_path=str(path),
-            page_count=page_count,
-        )
-        structured_json = parse_res["structured_json"]
-        fields = parse_res["flat_fields"]
-        json_str = parse_res["json_str"]
-
-        # 3. Save organized JSON file to disk
-        if output_json_path:
-            out_json_path = Path(output_json_path)
         else:
-            out_json_path = path.parent / f"{path.stem}_extracted.json"
+            # 1. OCR / text extraction fallback
+            ocr_text, page_count = extract_text(path)
 
-        save_structured_json(structured_json, out_json_path)
+            if not ocr_text.strip():
+                raise ValueError("OCR returned no readable text. Try a clearer image or PDF.")
+
+            if page_count > MAX_PAGES:
+                raise ValueError(
+                    f"Document has {page_count} pages, which exceeds the limit of {MAX_PAGES}."
+                )
+
+            # 2. Parse extracted plain text into organized JSON
+            parse_res = parse_invoice_to_json(
+                ocr_text,
+                file_name=original_filename,
+                file_path=str(path),
+                page_count=page_count,
+            )
+            structured_json = parse_res["structured_json"]
+            fields = parse_res["flat_fields"]
+            json_str = parse_res["json_str"]
+
+            # 3. Save organized JSON file to disk
+            if output_json_path:
+                out_json_path = Path(output_json_path)
+            else:
+                out_json_path = path.parent / f"{path.stem}_extracted.json"
+
+            save_structured_json(structured_json, out_json_path)
 
     fields["file_name"] = original_filename
     fields["file_path"] = str(path)
