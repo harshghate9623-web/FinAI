@@ -23,15 +23,17 @@ from app.services.parse_invoice import structured_to_flat_fields
 load_dotenv()
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
+DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite").strip()
 
 CANDIDATE_MODELS = [
     DEFAULT_MODEL,
     "gemini-2.5-flash-lite",
     "gemini-flash-latest",
-    "gemini-3.8-flash",
-    "gemini-3.5-flash",
+    "gemini-flash-lite-latest",
+    "gemini-3.1-flash-lite",
 ]
+
+_deprecated_models: set = set()
 
 
 def is_gemini_available() -> bool:
@@ -177,8 +179,8 @@ def extract_invoice_with_gemini(
         },
     }
 
-    # Deduplicate models preserving order
-    seen = set()
+    # Deduplicate models preserving order, skipping any previously known deprecated/failed models
+    seen = set(_deprecated_models)
     models_to_try = []
     for m in CANDIDATE_MODELS:
         if m and m not in seen:
@@ -190,15 +192,19 @@ def extract_invoice_with_gemini(
     for model_name in models_to_try:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
         try:
-            resp = requests.post(url, json=payload, timeout=45)
+            resp = requests.post(url, json=payload, timeout=25)
             if resp.status_code == 200:
                 result_json = resp.json()
                 raw_text = result_json["candidates"][0]["content"]["parts"][0]["text"]
                 extracted_dict = json.loads(raw_text)
                 print(f"[Gemini] Successfully extracted invoice using model: {model_name}")
                 break
+            elif resp.status_code in (404, 400):
+                # Model is deprecated, not found, or unsupported; remember to not retry
+                _deprecated_models.add(model_name)
+                print(f"[Gemini] Model '{model_name}' unavailable ({resp.status_code}): {resp.text[:120]}")
             else:
-                print(f"[Gemini] Model '{model_name}' returned status {resp.status_code}: {resp.text[:140]}")
+                print(f"[Gemini] Model '{model_name}' returned status {resp.status_code}: {resp.text[:120]}")
         except Exception as exc:
             print(f"[Gemini] Error calling model '{model_name}': {exc}")
             continue

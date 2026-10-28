@@ -195,7 +195,7 @@ if input_mode == "📁 Upload Invoice / OCR File":
                     response = requests.post(
                         f"{API_BASE}/upload",
                         files={"file": (uploaded_file.name, file_bytes)},
-                        timeout=90,
+                        timeout=300,
                     )
                     if response.ok:
                         st.session_state["invoice_result"] = response.json()
@@ -214,6 +214,8 @@ if input_mode == "📁 Upload Invoice / OCR File":
                             st.success(f"Invoice analyzed and saved as record #{single_id} in PostgreSQL database!")
                     else:
                         st.error(f"API error {response.status_code}: {response.text}")
+                except requests.exceptions.ReadTimeout:
+                    st.error("⏳ Processing timed out (exceeded 300s). For large or multi-page documents on cloud hosting, please ensure the backend is active, or try with fewer pages.")
                 except requests.exceptions.ConnectionError:
                     st.error("Cannot reach backend API. Make sure FastAPI server is running.")
 
@@ -234,7 +236,7 @@ else:
                     response = requests.post(
                         f"{API_BASE}/process-text",
                         json={"ocr_text": pasted_text, "filename": custom_filename},
-                        timeout=90,
+                        timeout=180,
                     )
                     if response.ok:
                         st.session_state["invoice_result"] = response.json()
@@ -244,6 +246,8 @@ else:
                         st.success("Plain text parsed and saved to database!")
                     else:
                         st.error(f"API error {response.status_code}: {response.text}")
+                except requests.exceptions.ReadTimeout:
+                    st.error("⏳ Text processing timed out. Please try again.")
                 except requests.exceptions.ConnectionError:
                     st.error("Cannot reach backend API. Make sure FastAPI server is running.")
 

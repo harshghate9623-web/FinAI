@@ -82,11 +82,12 @@ def _score_text(text: str) -> Tuple[int, int]:
 
 def ocr_single_page(image: Image.Image) -> str:
     """
-    Run multi-pass OCR on a single invoice image:
+    Run multi-pass OCR on a single invoice image with early-exit optimization:
     1. Run PSM 3 on preprocessed (scaled & grayscale) image.
-    2. Run PSM 3 on original image as fallback.
-    3. If keyword density is low, attempt PSM 4 and PSM 6.
-    4. Return the candidate with the highest keyword count and substantive length.
+    2. If Pass 1 finds sufficient invoice keywords and content, return immediately.
+    3. Run PSM 3 on original image as fallback.
+    4. If keyword density remains low, attempt PSM 4 and PSM 6.
+    5. Return the candidate with the highest keyword count and substantive length.
     """
     _configure_tesseract()
     preprocessed = preprocess_image(image)
@@ -98,6 +99,10 @@ def ocr_single_page(image: Image.Image) -> str:
         t1 = pytesseract.image_to_string(preprocessed, config="--oem 3 --psm 3")
         if t1.strip():
             candidates.append(t1)
+            score_1 = _score_text(t1)
+            # Early exit: high confidence scan with 2+ keywords and solid text length
+            if score_1[0] >= 2 and score_1[1] >= 100:
+                return t1.strip()
     except Exception:
         pass
 
@@ -106,6 +111,9 @@ def ocr_single_page(image: Image.Image) -> str:
         t2 = pytesseract.image_to_string(image, config="--oem 3 --psm 3")
         if t2.strip():
             candidates.append(t2)
+            score_2 = _score_text(t2)
+            if score_2[0] >= 2 and score_2[1] >= 100:
+                return t2.strip()
     except Exception:
         pass
 
@@ -203,7 +211,7 @@ def split_pdf_to_pages(file_path: str | Path, output_dir: Optional[Path] = None)
         return [(path, 1)]
 
 
-def render_pages(file_path: str | Path, dpi: int = 300) -> List[Image.Image]:
+def render_pages(file_path: str | Path, dpi: int = 200) -> List[Image.Image]:
     """
     Return a list of PIL Images — one per page.
     Supports PDF (via pdf2image with fallback to pypdf embedded image extraction)
@@ -241,7 +249,7 @@ def render_pages(file_path: str | Path, dpi: int = 300) -> List[Image.Image]:
     return [Image.open(path).convert("RGB")]
 
 
-def extract_text(file_path: str | Path, dpi: int = 300) -> Tuple[str, int]:
+def extract_text(file_path: str | Path, dpi: int = 200) -> Tuple[str, int]:
     """
     Extract text from a PDF or image file:
     1. For PDFs: Attempts direct digital extraction first (fast, 100% accurate, zero external binaries needed).
