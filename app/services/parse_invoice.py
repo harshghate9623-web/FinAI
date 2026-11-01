@@ -105,13 +105,16 @@ def parse_date_str(val: Any) -> Optional[str]:
     val_str = str(val).strip()
     # Common separators: / - . or whitespace
     patterns = [
-        ("%Y-%m-%d", r"^\d{4}-\d{1,2}-\d{1,2}"),
-        ("%d/%m/%Y", r"^\d{1,2}/\d{1,2}/\d{4}"),
-        ("%d-%m-%Y", r"^\d{1,2}-\d{1,2}-\d{4}"),
-        ("%d.%m.%Y", r"^\d{1,2}\.\d{1,2}\.\d{4}"),
-        ("%m/%d/%Y", r"^\d{1,2}/\d{1,2}/\d{4}"),
-        ("%d %b %Y", r"^\d{1,2}\s+[A-Za-z]{3}\s+\d{4}"),
-        ("%d %B %Y", r"^\d{1,2}\s+[A-Za-z]{4,9}\s+\d{4}"),
+        ("%Y-%m-%d", r"^\d{4}-\d{1,2}-\d{1,2}$"),
+        ("%d/%m/%Y", r"^\d{1,2}/\d{1,2}/\d{4}$"),
+        ("%d/%m/%y", r"^\d{1,2}/\d{1,2}/\d{2}$"),
+        ("%d-%m-%Y", r"^\d{1,2}-\d{1,2}-\d{4}$"),
+        ("%d-%m-%y", r"^\d{1,2}-\d{1,2}-\d{2}$"),
+        ("%d.%m.%Y", r"^\d{1,2}\.\d{1,2}\.\d{4}$"),
+        ("%d.%m.%y", r"^\d{1,2}\.\d{1,2}\.\d{2}$"),
+        ("%m/%d/%Y", r"^\d{1,2}/\d{1,2}/\d{4}$"),
+        ("%d %b %Y", r"^\d{1,2}\s+[A-Za-z]{3}\s+\d{4}$"),
+        ("%d %B %Y", r"^\d{1,2}\s+[A-Za-z]{4,9}\s+\d{4}$"),
     ]
     for fmt, regex in patterns:
         if re.search(regex, val_str, re.IGNORECASE):
@@ -124,7 +127,7 @@ def parse_date_str(val: Any) -> Optional[str]:
     # Fallback search inside string
     m = re.search(r"(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4})", val_str)
     if m:
-        sub = m.group(1).replace(".", "/")
+        sub = m.group(1).replace(".", "/").replace("-", "/")
         for fmt in ("%d/%m/%Y", "%d/%m/%y", "%m/%d/%Y", "%Y/%m/%d"):
             try:
                 return datetime.datetime.strptime(sub, fmt).strftime("%Y-%m-%d")
