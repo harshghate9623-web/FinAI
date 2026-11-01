@@ -68,6 +68,25 @@ def preprocess_image(image: Image.Image) -> Image.Image:
     return image.convert("L")
 
 
+def preprocess_thermal(image: Image.Image) -> Image.Image:
+    """
+    Enhanced preprocessing specifically designed for faint, low-contrast,
+    or smartphone-photographed thermal POS receipts.
+    Applies auto-contrast stretching, high contrast boost, and edge sharpening.
+    """
+    w, h = image.size
+    min_dim = min(w, h)
+    if min_dim < 1200:
+        scale = max(1.5, min(2.5, 1400.0 / float(min_dim)))
+        resample_filter = getattr(Image, "Resampling", Image).BILINEAR
+        image = image.resize((int(w * scale), int(h * scale)), resample_filter)
+
+    gray = image.convert("L")
+    auto = ImageOps.autocontrast(gray, cutoff=1)
+    enh = ImageEnhance.Contrast(auto).enhance(1.8)
+    return enh.filter(ImageFilter.SHARPEN)
+
+
 def _score_text(text: str) -> Tuple[int, int]:
     """Score extracted text by invoice keyword density and substantive length."""
     keywords = (
@@ -82,54 +101,58 @@ def _score_text(text: str) -> Tuple[int, int]:
 
 def ocr_single_page(image: Image.Image) -> str:
     """
-    Run multi-pass OCR on a single invoice image with early-exit optimization:
-    1. Run PSM 3 on preprocessed (scaled & grayscale) image.
-    2. If Pass 1 finds sufficient invoice keywords and content, return immediately.
-    3. Run PSM 3 on original image as fallback.
-    4. If keyword density remains low, attempt PSM 4 and PSM 6.
-    5. Return the candidate with the highest keyword count and substantive length.
+    Run multi-pass OCR on a single invoice or POS receipt image:
+    1. Pass 1: Standard preprocessed image with PSM 3 (auto page segmentation).
+    2. If Pass 1 finds very high confidence text (>= 5 keywords and >= 300 chars), return immediately.
+    3. Pass 2: Thermal POS preprocessed image with PSM 6 (uniform block, ideal for receipts/tables).
+    4. Pass 3: Raw image with PSM 3.
+    5. Pass 4: Thermal image with PSM 4 (single column) as fallback.
+    6. Return the candidate with the highest keyword score and substantive content.
     """
     _configure_tesseract()
     preprocessed = preprocess_image(image)
 
     candidates: List[str] = []
 
-    # Pass 1: Preprocessed image with PSM 3 (automatic page segmentation)
+    # Pass 1: Standard preprocessed image with PSM 3
     try:
         t1 = pytesseract.image_to_string(preprocessed, config="--oem 3 --psm 3")
         if t1.strip():
             candidates.append(t1)
             score_1 = _score_text(t1)
-            # Early exit: high confidence scan with 2+ keywords and solid text length
-            if score_1[0] >= 2 and score_1[1] >= 100:
+            # Early exit ONLY on genuinely high-confidence, complete invoice scans
+            if score_1[0] >= 5 and score_1[1] >= 300:
                 return t1.strip()
     except Exception:
         pass
 
-    # Pass 2: Raw image with PSM 3 (in case downscaling/upscaling altered fine line textures)
+    # Pass 2: Thermal receipt enhancement with PSM 6 (single uniform block)
     try:
-        t2 = pytesseract.image_to_string(image, config="--oem 3 --psm 3")
+        thermal_img = preprocess_thermal(image)
+        t2 = pytesseract.image_to_string(thermal_img, config="--oem 3 --psm 6")
         if t2.strip():
             candidates.append(t2)
             score_2 = _score_text(t2)
-            if score_2[0] >= 2 and score_2[1] >= 100:
+            if score_2[0] >= 5 and score_2[1] >= 300:
                 return t2.strip()
     except Exception:
         pass
 
+    # Pass 3: Raw image with PSM 3 (in case downscaling/upscaling altered fine line textures)
+    try:
+        t3 = pytesseract.image_to_string(image, config="--oem 3 --psm 3")
+        if t3.strip():
+            candidates.append(t3)
+    except Exception:
+        pass
+
+    # Pass 4: Thermal with PSM 4 if still low
     best_candidate = max(candidates, key=_score_text) if candidates else ""
     best_score = _score_text(best_candidate)
-
-    # Pass 3: If keywords are sparse, try single column (PSM 4) or uniform block (PSM 6)
-    if best_score[0] < 2 or best_score[1] < 80:
+    if best_score[0] < 3:
         try:
-            t3 = pytesseract.image_to_string(preprocessed, config="--oem 3 --psm 4")
-            if t3.strip():
-                candidates.append(t3)
-        except Exception:
-            pass
-        try:
-            t4 = pytesseract.image_to_string(preprocessed, config="--oem 3 --psm 6")
+            thermal_img = preprocess_thermal(image)
+            t4 = pytesseract.image_to_string(thermal_img, config="--oem 3 --psm 4")
             if t4.strip():
                 candidates.append(t4)
         except Exception:

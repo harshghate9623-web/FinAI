@@ -59,6 +59,21 @@ STATE_ALIASES: Dict[str, str] = {
     "TELANGANA": "36", "TS": "36",
     "ANDHRA PRADESH (NEW)": "37",
     "LADAKH": "38",
+
+    # Major commercial hub & city aliases mapped to respective state GST codes
+    "PUNE": "27", "MUMBAI": "27", "BOMBAY": "27", "NAGPUR": "27", "NASHIK": "27", "THANE": "27", "NAVI MUMBAI": "27",
+    "BENGALURU": "29", "BANGALORE": "29", "MANGALORE": "29", "MYSORE": "29", "MYSURU": "29",
+    "HYDERABAD": "36", "SECUNDERABAD": "36", "WARANGAL": "36",
+    "CHENNAI": "33", "MADRAS": "33", "COIMBATORE": "33", "MADURAI": "33",
+    "KOLKATA": "19", "CALCUTTA": "19", "HOWRAH": "19",
+    "AHMEDABAD": "24", "SURAT": "24", "VADODARA": "24", "RAJKOT": "24",
+    "JAIPUR": "08", "JODHPUR": "08", "UDAIPUR": "08",
+    "LUCKNOW": "09", "KANPUR": "09", "NOIDA": "09", "GREATER NOIDA": "09", "GHAZIABAD": "09", "VARANASI": "09", "AGRA": "09",
+    "GURGAON": "06", "GURUGRAM": "06", "FARIDABAD": "06",
+    "PATNA": "10",
+    "BHOPAL": "23", "INDORE": "23",
+    "KOCHI": "32", "COCHIN": "32", "TRIVANDRUM": "32", "THIRUVANANTHAPURAM": "32",
+    "VISAKHAPATNAM": "28", "VIZAG": "28", "VIJAYAWADA": "28",
 }
 
 STATE_CODES = set(STATE_ALIASES.values())
@@ -185,8 +200,15 @@ def validate_invoices(df: pd.DataFrame) -> pd.DataFrame:
     # 5. Vendor address → state extraction + GSTIN state match
     if "vendor_address" in df.columns:
         extracted = df["vendor_address"].apply(extract_state_from_address)
-        df["extracted_vendor_state"] = extracted.apply(lambda x: x[0])
-        df["extracted_vendor_state_code"] = extracted.apply(lambda x: x[1])
+        parsed_state = extracted.apply(lambda x: x[0])
+        parsed_code = extracted.apply(lambda x: x[1])
+
+        # Preserve already-extracted state (e.g. from Gemini Vision or upstream parser)
+        existing_state = df["extracted_vendor_state"] if "extracted_vendor_state" in df.columns else pd.Series(None, index=df.index)
+        existing_code = df["extracted_vendor_state_code"] if "extracted_vendor_state_code" in df.columns else pd.Series(None, index=df.index)
+
+        df["extracted_vendor_state"] = parsed_state.combine_first(existing_state)
+        df["extracted_vendor_state_code"] = parsed_code.combine_first(existing_code)
 
         flag(
             df["vendor_address"].ne("") & df["extracted_vendor_state_code"].isna(),
