@@ -45,17 +45,19 @@ def is_gemini_available() -> bool:
 def _build_extraction_prompt() -> str:
     import datetime
     today_str = datetime.date.today().isoformat()
-    return f"""You are a senior auditor and expert in Indian B2B GST tax compliance.
-Current reference date for evaluation: {today_str}
-Examine this invoice document thoroughly and extract the exact structured data into JSON.
-
-Adhere strictly to these extraction instructions:
+    header = (
+        "You are a senior auditor and expert in Indian B2B GST tax compliance.\n"
+        f"Current reference date for evaluation: {today_str}\n"
+        "Examine this invoice document thoroughly and extract the exact structured data into JSON.\n\n"
+    )
+    instructions = """Adhere strictly to these extraction instructions:
 1. GSTIN:
    - Extract the 15-character Goods and Services Tax Identification Number for both Vendor and Buyer.
    - If there are OCR character confusions (e.g., 'O' instead of '0', 'I' instead of '1', 'Z' instead of '2'), restore the correct character based on the standard GSTIN schema: 2 digits (state) + 5 letters (PAN) + 4 digits + 1 letter + 1 char + 'Z' + 1 check char.
 2. Invoice Number & Dates:
    - Extract the invoice number accurately. Do not confuse 'TAX INVOICE' with the invoice number.
-   - Indian invoices strictly use the DD/MM/YY or DD/MM/YYYY date format. For example, '01/11/26' means 1st November 2026 ('2026-11-01'). Do not swap day and year or hallucinate past years like 2023.
+   - Indian invoices and POS receipts strictly follow the DD/MM/YY (or DD/MM/YYYY) sequence: Day is first, Month is second, and Year is third.
+   - For example, 'Date : 01/11/26' has Day=01, Month=11 (November), and Year=2026. This MUST be converted to ISO format as '2026-11-01' (November 1st, 2026). Do NOT treat 26 as the day or invert day and year.
    - Convert all dates to standard ISO format (YYYY-MM-DD).
 3. Financial Breakdown:
    - Extract subtotal (taxable value), CGST amount, SGST amount, IGST amount, total tax, and total amount (grand total).
@@ -116,6 +118,7 @@ Output JSON format must match this structure exactly:
   "ocr_text": "complete readable plain text of the invoice"
 }
 """
+    return header + instructions
 
 
 def extract_invoice_with_gemini(
